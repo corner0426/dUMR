@@ -4,7 +4,7 @@ dUMR(differentially Under Methylated Regions among normal tissues and pan-cancer
 ![workflow](https://github.com/methylation/dUMR/blob/master/imgs/dUMR.png "foo")
 
 ###Dependencies
-dUMR requires a working of Perl on Linux running environment. These scripts could be executable by using `chmod 755 command` or `perl command`.
+dUMR requires a working of Perl on Linux running environment. These scripts could be executable by using `chmod 755 command` or using `perl command` directly.
 
 ###Step1. Methylation calling
 For each whole genome bisulfite sequencing sample, BSMAP v2.90 was used to align reads to reference genome(hg19) after trimming low quality bases and adapter sequence. [1]
