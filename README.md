@@ -11,13 +11,13 @@ bsmap -a *_R1.fastq -b *_R2.fastq -d hg19.fa  -L 100 -R -p 4 -o *.bam
 ```
 
 ```
-
+methratio.py -g -u *.bam -o *.bed -d hg19.fa -s ./samtools
 ```
 
 ###Step2. Identification of UMR
 
 ```
-pattern
+pattern 
 ```
 
 ###Step3. Identification of reference UMR
