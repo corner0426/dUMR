@@ -61,7 +61,7 @@ dmr -r ref_UM/ref_UM.bed -rh 1 -w1 Normal_file_list.txt  -w2 Cancer_file_list.tx
 * -w2 wig file lists of group 2, each row is a methylome
 
 ###Reference
-[1] Xi Y, Li W. BSMAP: whole genome bisulfite sequence MAPping program[J]. BMC bioinformatics, 2009, 10(1): 1.
+[1] Xi Y, Li W. BSMAP: whole genome bisulfite sequence mapping program[J]. BMC bioinformatics, 2009, 10(1): 1.
 
 [2] Jeong M, Sun D, Luo M, et al. Large conserved domains of low DNA methylation maintained by Dnmt3a[J]. Nature genetics, 2014, 46(1): 17-23.
 
