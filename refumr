@@ -130,7 +130,7 @@ sub identify_umr_samples{
 
 	my %sample_bed_hs = ();    #sample_bed_hs --> sample_i --> chr --> [start, end]
 	foreach my $sample_i(0..$#sample_wig_files){
-		`$iBSTools_path/pattern -i $sample_wig_files[$sample_i] -n sample_$sample_i -o $outdir/sample_$sample_i` ;
+		`$iBSTools_path/umr -i $sample_wig_files[$sample_i] -n sample_$sample_i -o $outdir/sample_$sample_i` ;
 		$sample_bed_hs{$sample_i} = bed_chr_split("$outdir/sample_$sample_i/sample_$sample_i"."_$pattern.bed" , "has_head" );
 	}
 
