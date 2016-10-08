@@ -1069,10 +1069,10 @@ sub ucsc_bed_line{
 
 sub print_helpfile{
 	print qq(
-pattern VERSION: $VERSION
+umr VERSION: $VERSION
 ---------------------------------- H E L P ---------------------------------------
-"pattern" help you get methylation patterns from methylation level files(BS-Seq),
-"pattern" require ".wig" format and individual files.
+"umr" help you get methylation patterns from methylation level files(BS-Seq),
+"umr" require ".wig" format and individual files.
 	(If not ".wig",please use the tool "towig" at first)
 
 wig format must like this (chr1.wig):
@@ -1083,7 +1083,7 @@ wig format must like this (chr1.wig):
 		3004636	0.86956
 
 -------------------
-USAGE:	pattern [OPTION] [-i <folder>] [-o <folder>]
+USAGE:	umr [OPTION] [-i <folder>] [-o <folder>]
 -------------------
 ARGUMENTS:
 	--help,--man,-h
@@ -1102,11 +1102,11 @@ ARGUMENTS:
 -------------------
 EXAMPLE:
  BRIEF:
-	pattern -i H1_wig/ -o H1_pattern/ -n H1
+	umr -i H1_wig/ -o H1_pattern/ -n H1
 	  get methylation patterns from "H1_wig/".
  
  VERBOSE:
-	pattern -hs_string 6,4,4 -indir IMR90_wig/ -outdir IMR90_pattern/
+	umr -hs_string 6,4,4 -indir IMR90_wig/ -outdir IMR90_pattern/
 	  get methylation patterns from "IMR90_wig/".The hotspot threshold for methylation is 6,the hotspot threshold for 
 	  unmethylation is 4,and the hotspot threshold for semi-methylation is 4.
  OUTPUT:
