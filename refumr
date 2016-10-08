@@ -1,0 +1,940 @@
+#!/usr/bin/perl
+#--------------------------------------------------------------------------
+# This program is Copyright(C) 2015-20, Xinyu Wang (wangxinyuhs@126.com)
+#
+# This program is part of iBSTools.
+#
+# iBSTools is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# iBSTools is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with the program.  If not, see <http://www.gnu.org/licenses/>.
+#--------------------------------------------------------------------------
+
+use strict;
+use warnings;
+use Getopt::Long;
+use File::Basename;
+
+our $VERSION = "1.1.0";
+
+# params control
+my (
+	$help,
+
+	$iBSTools_path,
+	$pattern,
+	$wig_list,				#input, file lists. each row represents a sample.
+	$outdir,				#output, only directory.
+);
+
+my $bin_length = 50;
+my $overlap_bin_percent = 0.6;
+my $gap_threshold = 500;
+my $p_threshold = 10e-10;
+
+GetOptions(
+	'help|man|h'       => \$help,
+	
+	'path=s'   		   => \$iBSTools_path,
+	'p|pattern=s'      => \$pattern,
+	'w|wig_list=s'     => \$wig_list,
+	'o|outdir=s'       => \$outdir,
+
+	'b|bin_length=s'   => \$bin_length,
+	'gap_threshold=s'  => \$gap_threshold,
+	'p_threshold=s'    => \$p_threshold,
+	'overlap_threshold=s' => \$overlap_bin_percent,
+);
+
+
+print_helpfile() if($help);
+required_args($wig_list,$outdir,$iBSTools_path);
+outdir_control($outdir);
+
+my $html_dir = "$outdir/report";
+outdir_control($html_dir);
+
+####out settings.
+#$out_fh refumr.bed
+#$bin_signal_fh bin_signal.wig
+my ( $out_fh , $bin_signal_fh ) = out_settings( $outdir, $pattern );
+
+#for each sample, identify UMRs.
+my $sample_bed_hs_ref = identify_umr_samples( $wig_list , $pattern );
+
+print "Identification of $pattern regions for each sample is completed!\n";
+print "Now begin to identify reference $pattern regions among these samples:\n";
+
+####for each chr, merge region and get Overlap. 
+my @samples_num = keys %$sample_bed_hs_ref ;
+
+foreach my $chr( sort keys %{${$sample_bed_hs_ref}{"0"}} ){
+	my $start_time = time();		#Start time
+
+	#mutiple regions -> merged region
+	my $merged_samples_region_ref = merge_samples_regions( \@samples_num , $sample_bed_hs_ref , $chr );
+	
+	#region --> bin // 50bp
+	my $splitted_bin_regions_ref = split_regions( $merged_samples_region_ref , $bin_length );
+	
+	#overlap_count and filter by threshold
+	my ( $splitted_bin_overlap_count_ref , $index_filtered_ref ) = 
+		cal_overlap_count( $splitted_bin_regions_ref, \@samples_num , $sample_bed_hs_ref , $chr, $overlap_bin_percent ); 
+	
+	##print bin signal (.wig)
+	print_bin_signal( $chr, $splitted_bin_regions_ref , $splitted_bin_overlap_count_ref , $bin_signal_fh , \@samples_num );
+	
+	#identify refumr relying on index_filtered.
+	my ( $refumr_arr_ref , $lambda ) = identify_refumr($splitted_bin_regions_ref , $splitted_bin_overlap_count_ref , $index_filtered_ref ,
+											$bin_length , \@samples_num , $gap_threshold , $overlap_bin_percent );
+	
+	#print into out_fh
+	print_out( $out_fh , $refumr_arr_ref, $splitted_bin_overlap_count_ref , $splitted_bin_regions_ref , $lambda , $chr );
+	
+	print "REFUMR: $chr is completed, ",(time() - $start_time)," seconds in total!\n";
+}
+
+close $out_fh;
+####Rscript 
+R_poisson( $outdir, $html_dir, $pattern );
+html_output( $outdir, $html_dir, $pattern ,$wig_list );
+
+####Sub Programs
+
+#out settings
+sub out_settings{
+	my ( $outdir, $pattern ) = @_;
+	
+	open my $out_fh,">","$outdir/ref_$pattern.tmp" or die "$outdir/ref_$pattern.tmp"."\nPlease check up this path!\n";;
+	open my $bin_signal_fh,">","$outdir/bin_signal_$pattern.wig" or die "$outdir/all_bin_$pattern.wig"."\nPlease check up this path!\n";;
+	print $bin_signal_fh qq(track type=wiggle_0 name="$pattern signal for each bin" visibility=full color=20,150,20 altColor=150,20,20 windowingFunction=mean\n);
+	
+	return ( $out_fh, $bin_signal_fh );
+}
+
+#identify umr for each sample.
+sub identify_umr_samples{
+	my ( $wig_list , $pattern ) = @_;
+	open FL,"<",$wig_list or die "$wig_list Please check up this path!";
+
+	my @sample_wig_files = <FL>;
+	chomp @sample_wig_files;
+
+	my %sample_bed_hs = ();    #sample_bed_hs --> sample_i --> chr --> [start, end]
+	foreach my $sample_i(0..$#sample_wig_files){
+		`$iBSTools_path/pattern -i $sample_wig_files[$sample_i] -n sample_$sample_i -o $outdir/sample_$sample_i` ;
+		$sample_bed_hs{$sample_i} = bed_chr_split("$outdir/sample_$sample_i/sample_$sample_i"."_$pattern.bed" , "has_head" );
+	}
+
+	return \%sample_bed_hs;
+}
+
+#print_bin_signal 
+sub print_bin_signal{
+	my ( $chr, $splitted_bin_regions_ref , $splitted_bin_overlap_count_ref, $bin_signal_fh , $samples_num_ref ) = @_;
+
+	####print overlap signal for each bin
+	print $bin_signal_fh "variableStep chrom=$chr\n";
+	foreach my $i(0..$#$splitted_bin_regions_ref){ #initialize
+		my $position = $$splitted_bin_regions_ref[$i][1];
+		my $signal = $$splitted_bin_overlap_count_ref[$i] * (100 / scalar @$samples_num_ref ) ;
+		print $bin_signal_fh "$position\t$signal\n";
+	}
+	####print end 
+}
+
+=DESCRIPTION bed_chr_split  	[ INDEPENDENT ]
+    * Name: bed_chr_split
+    * Function: split bed file into chr arrs.
+    * Params: $infile , $has_head
+    * Return: \@chr_bed_hs
+    * Independence: [ INDEPENDENT ]
+=cut
+
+sub bed_chr_split{
+	my ( $infile , $has_head ) = @_;
+	open my $in_fh,"<",$infile or die $infile."\nPlease check up this path!\n";
+	
+	#delete the head 
+	if($has_head){
+		<$in_fh>;
+	}
+	
+	my %chr_bed_hs  = ();
+
+	my $chr = "";
+	while( <$in_fh> ){
+		chomp;
+		my @arr = split;
+		my ( $curChr, $start, $end ) = @arr[0, 1, 2];
+
+		if($curChr ne $chr){  	# current chromosome
+			$chr = $curChr;
+			$chr_bed_hs{$chr}  = [];
+		}
+		else{
+			push @{ $chr_bed_hs{$chr} } , [ $arr[1], $arr[2] ];
+		}
+	}
+	return \%chr_bed_hs ;
+}
+
+#merge samples regions [ merge_regions REQUIRED ]
+sub merge_samples_regions{
+	my ( $samples_num_ref , $sample_bed_hs_ref , $chr ) = @_;
+	
+	my @samples_region_arr = ();   #[start , end]regions in all samples for a specified chromosome 
+	foreach my $sample_i( @$samples_num_ref ){
+		push @samples_region_arr, @{ ${ ${$sample_bed_hs_ref}{$sample_i} }{$chr} };
+	}
+	my @sorted_samples_region_arr = sort { $a->[0] <=> $b->[0] or $a->[1] <=> $b->[1] } @samples_region_arr ;
+	my $merged_samples_region_ref = merge_regions( \@sorted_samples_region_arr );
+	
+	return $merged_samples_region_ref;
+}
+
+=DESCRIPTION merge_regions			[ INDEPENDENT ]
+Goal  : merge regions(REQUIRED sorted start position) for one or mutiple type (merge intersect and include).
+Usage : merge_regions(\@region)
+Return: an merged array reference
+	\@merged_regions	
+=cut
+sub merge_regions{
+	my ($region_arr_ref) = @_;
+	
+	my @merged_regions = ();
+	my $index = 0;
+	while($index <= $#$region_arr_ref){
+		my ( $left_edge , $right_edge ) 
+				= ( $$region_arr_ref[$index][0] , $$region_arr_ref[$index][1] );
+		
+		while( ($index+1 <= $#$region_arr_ref ) && $right_edge > $$region_arr_ref[$index+1][0] ){	#current end is at the the right of next start
+			if($right_edge >= $$region_arr_ref[$index+1][1]){
+				;
+			}
+			else{
+				$right_edge = $$region_arr_ref[$index+1][1];
+			}
+			$index ++;
+		}
+		push @merged_regions , [ $left_edge , $right_edge ] ;
+		$index ++ ; 
+	}
+	return \@merged_regions;
+}
+
+=DESCRIPTION split_regions			[ INDEPENDENT ]
+Goal  : split regions in mutiple smaller regions (REQUIRED sorted start position).
+Usage : split_regions(\@region , $bin_length )
+Return: an splitted array reference
+	\@splitted_regions	
+=cut
+sub split_regions{
+	my ( $region_arr_ref , $bin_length ) = @_;
+	
+	my @splitted_regions = ();
+	my $index = 0;
+	while($index <= $#$region_arr_ref){
+		my ( $left_edge , $right_edge ) 
+				= ( $$region_arr_ref[$index][0] , $$region_arr_ref[$index][1] );
+		
+		my ( $bin_left_edge, $bin_right_edge ) = ( $left_edge, $left_edge + $bin_length - 1);
+		while( $bin_left_edge <= $right_edge){
+			if( $bin_right_edge >= $right_edge ){
+				push @splitted_regions , [ $bin_left_edge, $right_edge ] ;
+				last ;
+			}
+
+			push @splitted_regions , [ $bin_left_edge, $bin_right_edge ] ;
+
+			$bin_left_edge  += $bin_length ;
+			$bin_right_edge += $bin_length ;
+		}
+		
+		$index ++ ; 
+	}
+	return \@splitted_regions;
+}
+
+#calculate methylation [ getOverlap REQUIRED ]
+sub cal_overlap_count{
+	my ( $splitted_bin_regions_ref, $samples_num_ref , $sample_bed_hs_ref , $chr , $overlap_bin_percent ) = @_;
+	
+	my @splitted_bin_overlap_count = ();
+	foreach my $i(0..$#$splitted_bin_regions_ref){ #initialize
+		$splitted_bin_overlap_count[$i] = 0;
+	}
+	
+	foreach my $sample_i( @$samples_num_ref ){
+		my @overlap_percent_arr = getOverlap ( $splitted_bin_regions_ref , ${ ${$sample_bed_hs_ref}{$sample_i} }{$chr}, "%" );
+		foreach my $j(0..$#overlap_percent_arr){
+			if ( $overlap_percent_arr[$j] > 0.2 ){
+				$splitted_bin_overlap_count[$j] ++;
+			}
+		}
+	}
+	
+	my $overlap_threshold = $overlap_bin_percent * scalar( @$samples_num_ref ) ;
+	my @index_filtered = (); 	#the indexes of bins which satisfy the filtering condition
+	foreach my $index(0..$#$splitted_bin_regions_ref){ #index is the index of @$splitted_bin_regions_ref
+		if( $splitted_bin_overlap_count[$index] >= $overlap_threshold ){
+			push @index_filtered , $index ; 
+		}
+	}
+	
+	return ( \@splitted_bin_overlap_count , \@index_filtered );
+}
+
+
+=DESCRIPTION getOverlap			[  merged_regions REQUIRED ]
+Goal  : merge regions(REQUIRED sorted start position) for one or mutiple type (merge intersect and include).
+Usage : 
+	getOverlap(\@arr,\@arr,"region"); 		an overlap matrix
+	getOverlap(\@arr,\@arr,"%"); 	an overlap percentage
+Return: an percentage array reference
+	\@percent_arr	
+=cut
+sub getOverlap{
+	my ($raw_base_ref,$raw_region_ref,$type) = @_;
+	
+	my ( $base_ref , $region_ref ) = ( merge_regions($raw_base_ref) , merge_regions($raw_region_ref) );
+	
+	my @percent_arr = ();
+	my @overlap_matrix = ();
+	
+	my $region_index = 0;
+	foreach my $i(0..$#$base_ref){
+		my ( $start , $end ) = ( $$base_ref[$i][0] , $$base_ref[$i][1] );
+	
+		my ( $overlap_length , $num ) = ( 0 , 0 );
+		my @overlap_regions = ();
+		while( $$region_ref[$region_index][1] < $start ){
+			last if ( $region_index >= $#$region_ref );
+			$region_index ++;
+		}#end: maybe the first region overlaped on base region. (>= start)
+		while( $$region_ref[$region_index][0] <= $end ){
+			last if ( $region_index >= $#$region_ref );
+			
+			my ($overlap_start, $overlap_end) = ($start,$end);
+			if( $$region_ref[$region_index][0] > $overlap_start ){	#determin overlap length
+				$overlap_start = $$region_ref[$region_index][0];
+			}
+			if( $$region_ref[$region_index][1] < $overlap_end ){
+				$overlap_end = $$region_ref[$region_index][1];
+			}
+			
+			$overlap_length += $overlap_end - $overlap_start + 1 ;
+			push @overlap_regions,($overlap_start,$overlap_end);
+			
+			$num ++;
+			$region_index ++;
+		}
+		#end: all region overlap region. ( >= start and <= end )
+		#print "start:$start end:$end\n";
+		#die "$overlap_length \t ".($end-$start+1)." \n" if ($start eq 20387 );
+		if($num){
+			$percent_arr[$i] = sprintf( "%.3f",$overlap_length/($end-$start+1) );
+			push @overlap_matrix,\@overlap_regions;
+		}
+		else{
+			$percent_arr[$i] = sprintf( "%.3f",0);
+			push @overlap_matrix,"-";
+		}
+		
+		$region_index -- if($region_index > 0);	#to avoid the right edge of left region == the left edge of right region
+	}
+	if($type eq "%"){
+		return @percent_arr;
+	}
+	else{
+		return @overlap_matrix;
+	}
+}
+
+=get_lambda
+get lamda for current chromosome , INDEPENDENT
+
+If the array is null, 
+you will get "-";
+Require numbers in this array.
+=cut
+sub get_lambda{		#( \@array )
+	my ($splitted_bin_regions_ref , $count_ref , $bin_length ) = @_ ;
+	
+	my ($sum , $num) = (0 , scalar @$count_ref);
+	
+	if($num == 0){
+		return "-";
+	}
+	else{
+		$num = ( $$splitted_bin_regions_ref[-1][1] - $$splitted_bin_regions_ref[0][0]) / $bin_length;
+	}
+	
+	foreach my $i (@$count_ref){
+		$sum += $i;
+	}
+	return $sum/$num;
+}
+
+#identify refumr [mean_num_of_bins, poission_density REQUIRED]
+sub identify_refumr{
+	my ($splitted_bin_regions_ref , $splitted_bin_overlap_count_ref , $index_filtered_ref, $bin_length , $samples_num_ref , $gap_threshold , $overlap_bin_percent ) = @_;
+
+	my @refumr_arr = ();
+	my $overlap_threshold = $overlap_bin_percent * scalar( @$samples_num_ref ) ;
+	my ( $lambda , $time , $num ) = ( get_lambda($splitted_bin_regions_ref, $splitted_bin_overlap_count_ref ,$bin_length ) , 1 , 0 );
+	$lambda = $lambda * (100 / scalar @$samples_num_ref );
+	
+	my $i = 0;
+	my ( $start_i , $end_i ) = ( $$index_filtered_ref[$i], $$index_filtered_ref[$i] );
+	while( $i <= $#$index_filtered_ref ){
+		my $index = $$index_filtered_ref[$i];	 #index is the value of @$index_filtered_ref which is the index of @$splitted_bin_regions_ref 
+		
+		if( $i eq $#$index_filtered_ref){		 #the last bin
+			push @refumr_arr, [ $start_i , $end_i ];
+			last;
+		}
+
+		#print "$i\t$index\t$start_i\t$end_i\t$$splitted_bin_regions_ref[$start_i][0]\t".($$splitted_bin_regions_ref[$index][1] + 1)."\t".$$splitted_bin_regions_ref[$index + 1][0]."\n";
+
+		#extend
+		####judge current bin is the end of refumr?
+		if( $$splitted_bin_regions_ref[$index][1] + 1 ne $$splitted_bin_regions_ref[ $$index_filtered_ref[$i+1] ][0] ){	#exists gap
+			my $mean_after_merged = mean_num_of_bins( $splitted_bin_overlap_count_ref , $start_i, $$index_filtered_ref[ $i + 1 ] , "mean" );
+			if( $$splitted_bin_regions_ref[ $$index_filtered_ref[$i+1] ][0] - $$splitted_bin_regions_ref[$end_i][1] <= $gap_threshold
+				and poisson_density( $mean_after_merged , 1 , $lambda ) <= $p_threshold
+			    and $mean_after_merged >= $overlap_threshold ){	#gap < threshold and mean < threshold ,extend
+				$start_i = $start_i ; 
+				$end_i = $index + 1 ;
+			}
+			else{ #next bin not belongs to refumr
+				$end_i = $index;
+				push @refumr_arr, [ $start_i , $end_i ];
+
+				$start_i = $$index_filtered_ref [$i + 1];
+				$end_i   = $$index_filtered_ref [$i + 1];
+			}
+		}
+		else{	#no gap, the next(index+1) bin belongs to refumr. extend
+			$start_i = $start_i ; 
+			$end_i = $index + 1 ;
+		}
+		$i ++ ;
+	}
+	return ( \@refumr_arr , $lambda );
+}
+
+sub mean_num_of_bins{
+	my ( $splitted_bin_overlap_count_ref , $start_i , $end_i , $type ) = @_;
+	my ($sum , $num) = (0 , $end_i - $start_i + 1);
+	foreach my $i ( $start_i .. $end_i ){
+		$sum += $$splitted_bin_overlap_count_ref[$i];
+	}
+	if( $type eq "sum"){
+		return ( $sum/$num , $sum );
+	}
+	else{
+		return $sum/$num;
+	}
+}
+
+
+=DESCRIPTION poisson_density  	[ INDEPENDENT ]
+    * Name: poisson_density
+    * Function: piosson test of an arr for a given distribution. 
+    			P(N(t)=n) -->eg. P(N(2) = 6) 2 unit time, the probability of rare events = 6.
+    * Params: $lambda, $time, $num 
+    * Return: p_value.
+    * Independence: [ INDEPENDENT ]
+=cut
+sub poisson_density{
+	my ($num, $time, $lambda) = @_;
+
+	my $m = $lambda * $time;
+	###factorial
+	my $n_factorial = 1;
+	if($num >= 1){
+		foreach my $i( 1 .. $num ){
+			$n_factorial *= $i;
+		}
+	}
+
+	return ( $m  ** $num ) * exp( - $m ) / $n_factorial ;
+}
+
+sub print_out{
+	my ( $out_fh , $refumr_arr_ref, $splitted_bin_overlap_count_ref , $splitted_bin_regions_ref , $lambda , $chr ) = @_;
+	
+	foreach my $i( 0 .. $#$refumr_arr_ref ){
+		my ( $start_i , $end_i ) = ( $$refumr_arr_ref[$i][0] , $$refumr_arr_ref[$i][1] );
+		my $num  = $end_i - $start_i + 1;
+		my ( $mean , $sum ) = mean_num_of_bins( $splitted_bin_overlap_count_ref , $start_i , $end_i , "sum" );
+		my $mean_norm = $mean * (100 / scalar(@samples_num));
+
+		print $out_fh "$chr\t$$splitted_bin_regions_ref[$start_i][0]\t$$splitted_bin_regions_ref[$end_i][1]"
+				."\t".( $$splitted_bin_regions_ref[$end_i][1] - $$splitted_bin_regions_ref[$start_i][0] + 1 )
+				."\t".sprintf( "%0.4f" ,$mean )."\t$mean_norm\t$lambda\n" ;
+	}
+}
+
+sub R_poisson{
+	my ( $outdir, $html_dir, $pattern ) = @_;
+	open R_POS,">","$outdir/poission.r" or die "WARNINGS: $outdir is not an available directory!";
+	print R_POS '
+Args <- commandArgs()
+if(is.na(Args[6])){
+	cat("RScript a.r refumr_file\n");
+	q();
+}
+
+infile <- Args[6];
+figure <- Args[7];
+outfile <- Args[8];
+
+refumr  <- read.table(header=FALSE,sep="\t",file=infile);
+
+for (i in 1:dim(refumr)){
+    p_value  = dpois( ceiling(refumr[i,6]) , refumr[i,7] );
+	p_adjust = p.adjust(p_value,method="fdr",dim(refumr));
+	refumr[i,5] <- refumr[i,6];
+	refumr[i,6] <- p_value;
+	refumr[i,7] <- p_adjust;
+}
+colnames(refumr) <- c( "chr", "start", "end", "length", "overlap_percentage", "P_value", "P_value_adjust");
+
+write.table(refumr,sep="\t",file=outfile,row.names=F,col.names=T,quote=F)
+
+length <- refumr[,4];
+jpeg(figure,width = 600, height = 600);
+plot(density(length), col="#3AB54A", lwd=3, main="", xlab="Length", bty="l" );
+';
+	`Rscript $outdir/poission.r $outdir/ref_$pattern.tmp $html_dir/length_distribution.jpg $outdir/ref_$pattern.bed`;
+}
+
+=DESCRIPTION html_output  	[ REQUIRE: css_style ]
+    * Name: html_output
+    * Function: html output.
+    * Params: $outdir , $pattern
+    * Return: void.
+    * Independence: 
+=cut
+sub html_output{
+	my ( $outdir, $html_dir, $pattern, $wig_list ) = @_;
+	open HTML,">","$html_dir/ref_$pattern.html" or die "WARNINGS: $outdir is not an available directory!";
+	####css
+	print HTML css_html();
+	####text 
+	print HTML title_html();
+	####1. file list summary in table.
+	print HTML tab_html($outdir, $wig_list);
+	####2. refumr density
+	print HTML density_html($outdir , $pattern);
+	####3. output description 
+	print HTML description($outdir);
+
+	print HTML "</body>\n</html>\n";
+}
+
+#description for html output
+sub description{
+	my ( $outdir ) = @_;
+	return q(
+<h3>3. Output</h3>
+<p>The output ".bed" file are stored in <code>).$outdir.q(</code>.Bed(Browser Extensible Data) format provides a flexible way to display on UCSC.</p>
+<p>&#9;In another way, bed can converted into bigbed by using <code>bedToBigBed</code>. The command line is like this:</p>
+<pre>$bedToBigBed -as=bed.as -type=bed9 ref_UM.bed hg19.chrom.sizes outdir/ref_UM.bb</pre>
+<p class="italic">&#9;hg19.chrom.sizes can download here.</p>
+);
+}
+
+#refumr density for html output
+sub density_html{
+	my ( $outdir , $pattern ) = @_;
+	
+	open REF,"<","$outdir/ref_$pattern.bed" or die;
+	my @ref_umrs = <REF>;
+	chomp @ref_umrs;
+
+	my $density_lines = '<h3>2. Reference UMR Sumamry</h3>'."\n";
+	$density_lines .= '<p>&#9;There are total '.(scalar(@ref_umrs) - 1)
+			.' reference unmethylated regions have been identified. The length distribution of these regions is showed below:</p>'."\n";
+	$density_lines .= '<img src="./length_distribution.jpg" alt="length distribution">'."\n";
+	$density_lines .= '<p class="italic">&#9;Fig 1. The green line represents the distribution of refumr.</p>'."\n";
+
+	return $density_lines;
+}
+
+
+#title for html output
+sub title_html{
+	return qq(
+<body>
+<h1 style="color:#4876FF">Refumr Outputs</h1>
+);
+}
+
+#tab for html output
+sub tab_html{
+	my ( $outdir, $wig_list ) = @_;
+
+	open FL,"<",$wig_list or die "$wig_list Please check up this path!";
+	my @sample_wig_files = <FL>;
+	chomp @sample_wig_files ;
+
+	my $tab_html_lines = '<h3>1. Samples Sumamry</h3>'."\n"
+							. '<p>&#9;There are total '.scalar(@sample_wig_files).' samples.'."\n"
+							. 'The files list and pattern regions counts are showed below:</p>'."\n"
+							. '<table class="zebra">'."\n"
+							.'  <tr>'."\n"
+							.'    <th>File List</th>'."\n"
+							.'    <th>UMR counts</th>'."\n"
+							.'    <th>IMR counts</th>'."\n"
+							.'    <th>FMR counts</th>'."\n"
+							.'  </tr>'."\n";
+
+	my @sample_files = glob("$outdir/sample_*/sample_*_UM.bed");
+
+	foreach my $sample_i(0..$#sample_files){
+		my $sample_file = $sample_files[$sample_i];
+		open UM,"<",$sample_file or die "";
+		my @UM_lines = <UM>;
+		my $UM_counts =  (scalar @UM_lines) - 1 ;
+
+		$sample_file =~ s/UM/IM/g;
+		open IM,"<",$sample_file or die "";
+		my @IM_lines = <IM>;
+		my $IM_counts =  (scalar @IM_lines) - 1 ;
+
+		$sample_file =~ s/IM/FM/g;
+		open FM,"<",$sample_file or die "";
+		my @FM_lines = <FM>;
+		my $FM_counts =  (scalar @FM_lines) - 1 ;
+
+		$tab_html_lines .= '  <tr>'."\n";
+		$tab_html_lines .= '    <td>'.basename($sample_wig_files[$sample_i]).'</td>'."\n";
+		$tab_html_lines .= '    <td>'.$UM_counts.'</td>'."\n";
+		$tab_html_lines .= '    <td>'.$IM_counts.'</td>'."\n";
+		$tab_html_lines .= '    <td>'.$FM_counts.'</td>'."\n";
+		$tab_html_lines .= '  </tr>'."\n";
+	}
+	$tab_html_lines .= '</table>'."\n";
+	return $tab_html_lines ; 
+}
+
+#css for html output
+sub css_html{
+	return q(
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+@charset "utf-8";
+
+html { font-size: 100%; overflow-y: scroll; -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+
+/* Markdown */
+
+body{
+    color:#444;
+    font-family:Georgia, Palatino, 'Palatino Linotype', Times, 'Times New Roman', serif;
+    font-size:13px;
+    line-height:1.5em;
+    padding:1em;
+    margin:auto;
+    max-width:42em;
+    background:#fefefe;
+}
+ 
+h1, h2, h3, h4, h5, h6 {
+    font-weight: bold;
+}
+ 
+h1 {
+    color: #000000;
+    font-size: 28px;
+}
+ 
+h2 {
+    border-bottom: 2px solid #CCCCCC;
+    color: #000000;
+    font-size: 24px;
+}
+ 
+h3 {
+    /*border-bottom: 2px solid #CCCCCC;*/
+    font-size: 18px;
+}
+ 
+h4 {
+    font-size: 16px;
+}
+ 
+h5 {
+    font-size: 14px;
+}
+ 
+h6 {
+    color: #777777;
+    background-color: inherit;
+    font-size: 14px;
+}
+ 
+hr {
+    height: 0.2em;
+    border: 0;
+    color: #CCCCCC;
+    background-color: #CCCCCC;
+}
+ 
+p, blockquote, ul, ol, dl, li, table, pre {
+    margin: 15px 0;
+}
+ 
+p{          /*Text*/
+    text-indent: 2em;
+    margin:1em 0;
+}
+
+p.italic{   /*Figure legend*/
+    text-indent: 2em;
+    margin:1em 0;
+    font-style:italic;
+}
+ 
+pre { 
+    font-family: Consolas, Monaco, Andale Mono, monospace;
+    background-color: #F8F8F8;    
+    border: 1px solid #CCCCCC;
+    border-radius: 3px;
+    overflow: auto;
+    padding: 5px;
+}
+ 
+pre code {
+    background-color: #F8F8F8;
+    border: none;    
+    padding: 0;
+}
+ 
+code {
+    font-family: Consolas, Monaco, Andale Mono, monospace;
+    background-color:#F8F8F8;
+    border: 1px solid #CCCCCC;
+    border-radius: 3px;
+    padding: 0 0.2em;
+    line-height: 1;
+}
+ 
+pre > code {
+    border: 0;
+    margin: 0;
+    padding: 0;
+}
+ 
+ 
+a{ color: #0645ad; text-decoration:none;}
+a:visited{ color: #0b0080; }
+a:hover{ color: #06e; }
+a:active{ color:#faa700; }
+a:focus{ outline: thin dotted; }
+a:hover, a:active{ outline: 0; }
+ 
+::-moz-selection{background:rgba(255,255,0,0.3);color:#000}
+::selection{background:rgba(255,255,0,0.3);color:#000}
+ 
+a::-moz-selection{background:rgba(255,255,0,0.3);color:#0645ad}
+a::selection{background:rgba(255,255,0,0.3);color:#0645ad}
+ 
+blockquote{
+    color:#666666;
+    margin:0;
+    padding-left: 3em;
+    border-left: 0.5em #EEE solid;
+}
+ 
+ul, ol { margin: 1em 0; padding: 0 0 0 2em; }
+li p:last-child { margin:0 }
+dd { margin: 0 0 0 2em; }
+ 
+img { border: 0; -ms-interpolation-mode: bicubic; vertical-align: middle; max-width:100%;}
+ 
+@media only screen and (min-width: 480px) {
+    body{font-size:14px;}
+}
+ 
+@media only screen and (min-width: 768px) {
+    body{font-size:16px;}
+}
+
+/* table */
+
+table {
+    *border-collapse: collapse; /* IE7 and lower */
+    border-spacing: 0;
+    width: 100%;    
+}
+
+/*----------------------*/
+
+.zebra td, .zebra th {
+    padding: 10px;
+    border-bottom: 1px solid #f2f2f2;    
+}
+
+.zebra tbody tr:nth-child(even) {
+    background: #f5f5f5;
+    -webkit-box-shadow: 0 1px 0 rgba(255,255,255,.8) inset; 
+    -moz-box-shadow:0 1px 0 rgba(255,255,255,.8) inset;  
+    box-shadow: 0 1px 0 rgba(255,255,255,.8) inset;        
+}
+
+.zebra th {
+    text-align: left;
+    text-shadow: 0 1px 0 rgba(255,255,255,.5); 
+    border-bottom: 1px solid #ccc;
+    background-color: #eee;
+    background-image: -webkit-gradient(linear, left top, left bottom, from(#f5f5f5), to(#eee));
+    background-image: -webkit-linear-gradient(top, #f5f5f5, #eee);
+    background-image:    -moz-linear-gradient(top, #f5f5f5, #eee);
+    background-image:     -ms-linear-gradient(top, #f5f5f5, #eee);
+    background-image:      -o-linear-gradient(top, #f5f5f5, #eee); 
+    background-image:         linear-gradient(top, #f5f5f5, #eee);
+}
+
+.zebra th:first-child {
+    -moz-border-radius: 6px 0 0 0;
+    -webkit-border-radius: 6px 0 0 0;
+    border-radius: 6px 0 0 0;  
+}
+
+.zebra th:last-child {
+    -moz-border-radius: 0 6px 0 0;
+    -webkit-border-radius: 0 6px 0 0;
+    border-radius: 0 6px 0 0;
+}
+
+.zebra th:only-child{
+    -moz-border-radius: 6px 6px 0 0;
+    -webkit-border-radius: 6px 6px 0 0;
+    border-radius: 6px 6px 0 0;
+}
+
+.zebra tfoot td {
+    border-bottom: 0;
+    border-top: 1px solid #fff;
+    background-color: #f1f1f1;  
+}
+
+.zebra tfoot td:first-child {
+    -moz-border-radius: 0 0 0 6px;
+    -webkit-border-radius: 0 0 0 6px;
+    border-radius: 0 0 0 6px;
+}
+
+.zebra tfoot td:last-child {
+    -moz-border-radius: 0 0 6px 0;
+    -webkit-border-radius: 0 0 6px 0;
+    border-radius: 0 0 6px 0;
+}
+
+.zebra tfoot td:only-child{
+    -moz-border-radius: 0 0 6px 6px;
+    -webkit-border-radius: 0 0 6px 6px
+    border-radius: 0 0 6px 6px
+}
+</style>
+</head>
+);
+}
+
+sub print_helpfile{
+	print qq(
+refumr VERSION: $VERSION
+---------------------------------- H E L P ---------------------------------------
+"refumr" help you get reference methylated regions from mutiple methylation files(BS-seq).
+"pattern" require ".wig" format and individual files.
+	(If not ".wig",please use the tool "towig" at first)
+
+wig format must like this (chr1.wig):
+	track type=wiggle_0 name="Methylation Level" visibility=full color=20,150,20 altColor=150,20,20 windowingFunction=mean
+		variableStep chrom=chr1
+		3003660	1
+		3004613	0.87804
+		3004636	0.86956
+
+-------------------
+USAGE:	pattern [OPTION] [-i <folder>] [-o <folder>]
+-------------------
+ARGUMENTS:
+	--help,--man,-h
+				display the helpfile.
+ OPTION:
+	-p,--pattern
+				(REQUIRED) Reference methylation pattern, must be one of "UM","IM" or "FM".
+	-b,--bin_length
+				Length of bin when split pattern region into mutiple reference bins. DEFAULT is 50.
+	--gap_threshold
+				Segment reference pattern regions when interval is larger than gap_threshold. DEFAULT is 500.
+	--p_threshold
+				Merge two adjacent reference pattern regions when the poisson density of them is less than p_threshold. DEFAULT is 10e-10.
+	--overlap_threshold
+				A bin is treated as reference bins when its overlap percent in total samples is less than overlap_threshold. DEFAULT is 0.6.	
+	
+ I/O:
+	-path
+				(REQUIRED) The absolute path of iBSTools.
+	-w,--wig_list
+				(REQUIRED) The input file list of methylation level, each line indicates a sample, requires ".wig" format.
+	-o,--outdir
+				(REQUIRED) The output directory. 
+
+-------------------
+EXAMPLE:
+ BRIEF:
+	refumr -path software/ -p UM -w wig_list.txt -o outdir 
+	  get reference methylation patterns regions from mutiple methylomes in "wig_list.txt".
+	  	 
+ VERBOSE:
+	refumr -path software/ -p UM -w wig_list.txt --gap_threshold 1000 -o outdir 
+	  get reference methylation patterns regions from mutiple methylomes in "wig_list.txt". gap threshold is 1000bp.
+ OUTPUT:
+	the output will in folder:report.
+-------------------------------------------------------------------------------
+);
+	die "\n";
+}
+
+sub outdir_control{		#( string folder )
+	my $outdir = $_[0];
+	
+	unless(-e $outdir){	
+		mkdir $outdir or die "Can't create $outdir!\nPlease check up this path.\n";
+	}
+}
+
+sub indir_control{		#( string folder )
+	my $indir = $_[0];
+	
+	unless(-e $indir and -d $indir){		
+		die "$indir open error!\nPlease check up this path.\n";
+	}
+}
+
+sub required_args{		#( @array )
+	my @arr = @_;
+	
+	foreach my $args(@arr){
+		unless($args){
+			print "Lack required arguments.\n";
+			print_helpfile();
+		}
+	}
+}

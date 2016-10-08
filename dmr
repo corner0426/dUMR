@@ -1,0 +1,478 @@
+#!/usr/bin/perl
+#--------------------------------------------------------------------------
+# This program is Copyright(C) 2015-20, Xinyu Wang (wangxinyuhs@126.com)
+#
+# This program is part of iBSTools.
+#
+# iBSTools is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# iBSTools is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with the program.  If not, see <http://www.gnu.org/licenses/>.
+#--------------------------------------------------------------------------
+
+use strict;
+use warnings;
+use Getopt::Long;
+use File::Basename;
+
+our $VERSION = "1.1.0";
+=steps
+	1. calculation mean methylation for reference regions.
+	2. remove regions with litter difference within group.
+	3. identify regions with great difference between groups.
+=cut
+
+# params control
+my (
+	$help,
+
+	$reference,					#a sprecific region, require chr, start, end.
+
+	$wl1,						#input,wig file lists for group 1. each row represents a sample.
+	$wl2,						#input,wig file lists for group 2. each row represents a sample.
+	$outdir,					#output, only directory. 
+);
+
+my $ref_head = 0;				#reference has a head?, default: 0
+my $infor_CG_threshold = 1;
+
+GetOptions(
+	'help|man|h'       => \$help,
+	
+	'r|reference=s'	   => \$reference,
+	'rh|ref_head'	   => \$ref_head,
+
+	'CG_nums=s'		   => \$infor_CG_threshold,
+
+	'w1|wig_list_1=s'  => \$wl1,
+	'w2|wig_list_2=s'  => \$wl2,
+	'o|outdir=s'       => \$outdir,
+
+);
+
+print_helpfile() if($help);
+required_args($reference, $wl1, $wl2, $outdir);
+outdir_control($outdir);
+
+###TO DO: wig_list check.
+
+#start 
+my $start_time = time(); 
+
+my $chr_ref_hs_ref = bed_chr_split( $reference , $ref_head );  # chr =>  [start , end]
+
+my $methy_matrix_ref1 = cal_mean_methy( $wl1, $chr_ref_hs_ref , $infor_CG_threshold );  #chr => [methy1, methy2, ..., methyN]
+my $methy_matrix_ref2 = cal_mean_methy( $wl2, $chr_ref_hs_ref , $infor_CG_threshold );  #chr => [methy1, methy2, ..., methyM]
+
+
+my ( $matrix_file, $num1, $num2) = print_matrix($outdir, $wl1, $wl2, $chr_ref_hs_ref, $methy_matrix_ref1, $methy_matrix_ref2 );
+
+
+####2. remove regions with litter difference within group
+
+####3. identify regions with great difference between groups.
+R_beta_lik_test($outdir, $matrix_file, $num1, $num2);
+
+print "Total time use: " . ( time() - $start_time ) . "\n";
+
+
+sub R_beta_lik_test{
+	my ($outdir, $matrix_file, $num1, $num2) = @_;
+	open R_lik,">","$outdir/beta_lik_test.r" or die "WARNINGS: $outdir is not an available directory!";
+	print R_lik '
+Args <- commandArgs()
+if(is.na(Args[6])){
+	cat("RScript a.r methy_file\n");
+	q();
+}
+
+infile <- Args[6];
+num1 <- Args[7];
+num2 <- Args[8];
+outfile <- Args[9];
+
+methy <- read.table(infile,header=T,sep="\t");
+
+
+chr <- c()
+start <- c()
+end <- c()
+mean1 <- c()
+mean2 <- c()
+var1 <- c()
+var2 <- c()
+abs.diff <- c()
+pvalue <- c()
+p.fdr <- c()
+
+index1 <- 3 + as.integer(num1)
+index2 <- 3 + as.integer(num1) + as.integer(num2)
+
+for (i in 1:nrow(methy)){
+  chr[i] <- methy[i,1]
+  start[i] <- methy[i,2]
+  end[i] <- methy[i,3]
+  
+  x1 <- as.numeric(methy[i,4:index1])  #Group1 
+  x2 <- as.numeric(methy[i,(index1 + 1):index2]) #Group2
+  
+  if( sum(is.na(x1)) == length(x1) || sum(is.na(x2)) == length(x2) ){ #all elements is NA
+    mean1[i] <- NA
+    mean2[i] <- NA
+    var1[i] <- NA
+    var2[i] <- NA
+    abs.diff[i] <- NA
+    pvalue[i] <- NA
+    p.fdr[i] <- NA
+    next; 
+  }
+  
+  x1[is.na(x1)]=mean(x1,na.rm=T)
+  x2[is.na(x2)]=mean(x2,na.rm=T)
+  
+  m1 <- mean(x1)
+  v1 <- var(x1)
+  m2 <- mean(x2)
+  v2 <- var(x2)
+  
+  if(m1 == 0){
+    m1 <- 0.001
+  }
+  if(m2 == 0){ #mean is 0 .... and another case 1.
+    m2 <- 0.001
+  }
+  if(m1 == 1){
+    m1 <- 1 - 0.001
+  }
+  if(m2 == 1){ #mean is 0 .... and another case 1.
+    m2 <- 1 - 0.001
+  }
+  if(v1 == 0){ 
+    v1 <- 1e-4
+  }
+  if(v2 == 0){
+    v2 <- 1e-4
+  }
+  
+  a1 = m1 * ( m1 * ( 1 - m1 ) / v1 - 1 )
+  b1 = ( 1 - m1 ) * ( m1 * ( 1 - m1 ) / v1 - 1 )
+  
+  a2 = m2 * ( m2 * ( 1 - m2 ) / v2 - 1 )
+  b2 = ( 1 - m2 ) * ( m2 * ( 1 - m2 ) / v2 - 1 )
+  
+  #var is too big. 
+  if(a1 < 0 || b1 < 0 ){
+    a1 <- abs(a1)
+    b1 <- abs(b1)
+  }
+  if(a2 < 0 || b2 < 0 ){
+    a2 <- abs(a2)
+    b2 <- abs(b2)
+  }
+  
+  x2[which(x2==0)] <- 0.001 
+  x2[which(x2==1)] <- 1 - 0.001
+  
+  statistic <- -2 * ( sum(log(dbeta(x2,shape1 = a1,shape2 = b1))) - sum(log(dbeta(x2,shape1 = a2,shape2 = b2))) )
+  
+  pvalue[i] <- 1 - pchisq(abs(statistic),df=2)
+  
+  if( !is.na(pvalue[i]) && pvalue[i] == 0){
+    pvalue[i] <- 1e-10
+  }
+  
+  mean1[i] <- m1
+  mean2[i] <- m2
+  var1[i] <- v1
+  var2[i] <- v2
+  
+  abs.diff[i] <- abs(m1 - m2)
+}
+p.fdr <- p.adjust(pvalue,method="fdr")
+
+out<-data.frame(chr, start, end, mean1, mean2, var1, var2, abs.diff, pvalue, p.fdr)
+write.table(out, outfile, sep="\t",row.names=F,col.names=T,quote=F)
+
+';
+	`Rscript $outdir/beta_lik_test.r $matrix_file $num1 $num2 $outdir/ref_diff.bed`;
+}
+
+
+sub print_matrix{
+	my ($outdir, $wl1, $wl2, $chr_ref_hs_ref, $methy_matrix_ref1, $methy_matrix_ref2 ) = @_;
+	
+	open OUT,">","$outdir/refumr_methy_matrix.txt" or die "$outdir/refumr_methy_matrix.txt can't create.Please check the path!\n";
+	
+	##print head line
+	print OUT "chr\tstart\tend";
+
+	open FL1,"<",$wl1 or die "$wl1 Please check up this path!";
+	my @sample_wig_files_1 = <FL1>;
+	chomp @sample_wig_files_1;
+	foreach my $sample_path(@sample_wig_files_1){
+		my $sample_name = fileparse($sample_path,".wig");
+		print OUT "\t".$sample_name;
+	}
+	open FL2,"<",$wl2 or die "$wl2 Please check up this path!";
+	my @sample_wig_files_2 = <FL2>;
+	chomp @sample_wig_files_2;
+	foreach my $sample_path(@sample_wig_files_2){
+		my $sample_name = fileparse($sample_path,".wig");
+		print OUT "\t".$sample_name;
+	}
+	print OUT "\n";
+
+	##print matrix
+	foreach my $chr( sort keys %{ $chr_ref_hs_ref } ){
+		my $bed_ref_arr_ref = $chr_ref_hs_ref -> {$chr};
+		my $matrix_ref1 = $methy_matrix_ref1 -> {$chr};
+		my $matrix_ref2 = $methy_matrix_ref2 -> {$chr};
+		
+		foreach my $region_i( 0 .. $#$bed_ref_arr_ref ){
+			print OUT "$chr\t$$bed_ref_arr_ref[$region_i][0]\t$$bed_ref_arr_ref[$region_i][1]\t";
+			print OUT join "\t", @{ $matrix_ref1 -> [$region_i] };
+			print OUT "\t";
+			print OUT join "\t", @{ $matrix_ref2 -> [$region_i] };
+			print OUT "\n";
+		}
+	}
+	close OUT;
+
+	return ( "$outdir/refumr_methy_matrix.txt", scalar @sample_wig_files_1, scalar @sample_wig_files_2 );
+}
+
+#calculation mean methylation for reference regions 
+#file_chr_split REQUIRED
+#get_methylation REQUIRED
+sub cal_mean_methy{
+	my ( $wig_list , $chr_ref_hs_ref , $infor_CG_threshold ) = @_;
+
+	open FL,"<",$wig_list or die "$wig_list Please check up this path!";
+	my @sample_wig_files = <FL>;
+	chomp @sample_wig_files;
+	close FL;
+
+	my %methy_matrix_hs = ();  # chr => [region_num x sample]
+
+	foreach my $chr ( sort keys %{ $chr_ref_hs_ref } ){ #calculate mean methylation for each chromosome.
+		my @chr_methy_matrix = ();  # region_num x sample
+		foreach my $sample_i(0..$#sample_wig_files){  #for each sample. 
+			my ( $chr_site_hs_ref , $chr_methy_hs_ref ) = file_chr_split( $sample_wig_files[$sample_i] );
+			#TO DO: check methylation and ref_region. chromosome equal or not equal.
+			
+			my $methy_arr_ref = get_methylation( $chr_ref_hs_ref -> {$chr} , $chr_site_hs_ref -> {$chr},
+								 				    $chr_methy_hs_ref -> {$chr} , $infor_CG_threshold );
+
+			foreach my $i( 0 .. $#$methy_arr_ref ){
+				$chr_methy_matrix[$i][$sample_i] = $methy_arr_ref -> [$i];
+			}
+		}#end all sample for a chromosome.
+		
+		$methy_matrix_hs{$chr} = \@chr_methy_matrix;
+	}
+
+	return \%methy_matrix_hs ;
+}
+
+
+=DESCRIPTION file_chr_split  	[ INDEPENDENT ]
+    * Name: file_chr_split
+    * Function: split file into chr arrs.
+    * Params: $infile
+    * Return: \@chr_methy_arrs , \@chr_site_arrs
+    * Independence: [ INDEPENDENT ]
+=cut
+
+sub file_chr_split{
+	my ( $infile ) = @_;
+	open my $in_fh,"<",$infile or die $infile."\nPlease check up this path!\n";
+	
+	my %chr_site_hs  = ();
+	my %chr_methy_hs = ();
+
+	my $chr = "0";
+	while( <$in_fh> ){
+		next if(/track type/);
+		chomp ;
+		if(/chrom/){ 	#declaration line
+			my @declaration_arrs = split /\s+/;
+			$chr = substr( $declaration_arrs[1], 6 ); #get chr from declaration line
+			$chr_site_hs{$chr}  = [];
+			$chr_methy_hs{$chr} = [];
+		}
+		else{
+			my @arr = split ;
+			push @{ $chr_site_hs{$chr}  } , $arr[0];
+			push @{ $chr_methy_hs{$chr} } , $arr[1];
+		}
+	}
+	close $in_fh;
+	return ( \%chr_site_hs , \%chr_methy_hs );
+}
+
+=DESCRIPTION bed_chr_split  	[ INDEPENDENT ]
+    * Name: bed_chr_split
+    * Function: split bed file into chr arrs.
+    * Params: $infile , $has_head
+    * Return: \@chr_bed_hs
+    * Independence: [ INDEPENDENT ]
+=cut
+
+sub bed_chr_split{
+	my ( $infile , $has_head ) = @_;
+	open my $in_fh,"<",$infile or die $infile."\nPlease check up this path!\n";
+	
+	#delete the head 
+	if($has_head){
+		<$in_fh>;
+	}
+	
+	my %chr_bed_hs  = ();
+
+	my $chr = "";
+	while( <$in_fh> ){
+		chomp;
+		my @arr = split;
+		my ( $curChr, $start, $end ) = @arr[0, 1, 2];
+
+		if($curChr ne $chr){  	# current chromosome
+			$chr = $curChr;
+			$chr_bed_hs{$chr}  = [];
+		}
+		else{
+			push @{ $chr_bed_hs{$chr} } , [ $arr[1], $arr[2] ];
+		}
+	}
+	close $in_fh;
+	return \%chr_bed_hs ;
+}
+
+=Data Description
+@Base (sorted)
+12  33
+45	65
+@Methy (sorted)
+123	0.12
+355	0.43
+=cut
+=Usage
+my $ref = getMethylation(\@region,\@site,\@methy);
+foreach my $i(@$ref){
+	print $i."\n";
+}
+#date: 24/6/2016
+=cut
+#get_methylation(\@region,\@site,\@methy)
+sub get_methylation{
+	my ( $region_ref, $site_ref, $methy_ref, $infor_CG_threshold ) = @_;
+	
+	my @base_methy = ("NA") x scalar @$region_ref; #initialization
+	
+	my $site_index = 0;
+	my $first_right_site_index =0;
+
+	foreach my $i(0..$#$region_ref){
+		my ( $start , $end ) = ( $$region_ref[$i][0] , $$region_ref[$i][1] );
+		
+		my ( $sum , $num ) = ( 0 , 0 );
+		while( $$site_ref[$site_index] < $start ){
+			last if ( $site_index >= $#$site_ref );
+			$site_index ++;
+		}#end: maybe the first site in region. (>= start)
+		$first_right_site_index = $site_index ; #mark first mapping site
+
+		while( $$site_ref[$site_index] <= $end ){	#all sites in region. ( >= start and <= end )
+			last if ( $site_index >= $#$site_ref );
+
+			$sum += $$methy_ref[$site_index] ;
+			$num ++;
+			$site_index ++;
+		}#end: out region
+		
+		if($num >= $infor_CG_threshold){		#there must be more than $infor_CG_threshold CpG sites.
+			$base_methy[$i] = sprintf("%.3f", $sum/$num );
+		}
+		
+		$site_index = $first_right_site_index ; #to return first mapping site
+	}
+	
+	return \@base_methy;
+}
+
+sub print_helpfile{
+	print qq(
+dmr VERSION: $VERSION
+---------------------------------- H E L P ---------------------------------------
+"dmr" help you identify differentially methylated regions from mutiple methylomes(BS-seq).
+
+-------------------
+USAGE:	dmr [OPTION] [-r <file>] [-w1 <file>] [-w2 <file>] [-o <folder>]
+-------------------
+ARGUMENTS:
+	--help,--man,-h
+				display the helpfile.
+ OPTION:
+	-rh,--ref_head
+				reference bed file has head. DEFAULT: 0 (has no head). 1 means has head.
+
+	
+ I/O:
+	-r
+				(REQUIRED) The path of reference regions. no head and first three columns like bed: chromosome, start ,end.
+	-w1,--wig_list_1
+				(REQUIRED) The input file list of methylation level, each line indicates a sample, requires ".wig" format.
+	-w2,--wig_list_2
+				(REQUIRED) The input file list of methylation level, each line indicates a sample, requires ".wig" format.
+	-o,--outdir
+				(REQUIRED) The output directory. 
+
+-------------------
+EXAMPLE:
+ BRIEF:
+	dmr -r ref_UM.bed -w1 tissue.txt -w2 cancer.txt -o outdir 
+	  get differentially methylated regions for a specific genomic regions between two groups of methylomes.
+	  	 
+ VERBOSE:
+	dmr -r ref_UM.bed -w1 tissue.txt -w2 cancer.txt -o outdir 
+	  get differentially methylated regions for a specific genomic regions between two groups of methylomes.
+ OUTPUT:
+	the output will in folder:report.
+-------------------------------------------------------------------------------
+);
+	die "\n";
+}
+
+sub outdir_control{		#( string folder )
+	my $outdir = $_[0];
+	
+	unless(-e $outdir){	
+		mkdir $outdir or die "Can't create $outdir!\nPlease check up this path.\n";
+	}
+}
+
+sub indir_control{		#( string folder )
+	my $indir = $_[0];
+	
+	unless(-e $indir and -d $indir){		
+		die "$indir open error!\nPlease check up this path.\n";
+	}
+}
+
+sub required_args{		#( @array )
+	my @arr = @_;
+	
+	foreach my $args(@arr){
+		unless($args){
+			print "Lack required arguments.\n";
+			print_helpfile();
+		}
+	}
+}
