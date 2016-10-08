@@ -25,29 +25,37 @@ methratio.py -g -u *.bam -o *.bed -d hg19.fa -s ./samtools
 * -u aligned file
 * -o methyaltion ratio file [OUTPUT]
 * -d reference genome
-* -s path of SAMTools
+* -s path of `SAMTools`
 
 ###Step2. Identification of UMR
-Under Methylated Regions were defined as including at least 4 consecutive hypomethylated CpGs and mean methylation level less than 0.1 [2]. For each WGBS methylome, UMRs were identified by perl script `pattern`.
-the command line was in the following:
+Under Methylated Regions were defined as including at least 4 consecutive hypomethylated CpGs and mean methylation level less than 0.1 [2]. For each WGBS methylome, UMRs were identified by perl script `pattern` and the command line was in the following:
 ```
 pattern -i *.wig -o pattern/ -n name
 ```
-* -i 
-* -o 
-* -n 
+* -i input methylation level file(.wig)
+* -o output UMRs file
+* -n sample name
 
 ###Step3. Identification of reference UMR
-
+`refumr` was used to identify high confidence and reference under methylated regions from mutiple methylomes.
 ```
-refumr -p UM -path ./software/iBSTools_v1.1.0/ -w wig_list.txt -o ref_UM
+refumr -p UM -path ./ -w wig_list.txt -o ref_UM
 ```
+* -p identifies reference pattern type:UM
+* -path the path of `pattern`
+* -w wig file lists, each row is a methylome
+* -o reference UMRs out directory
 
 ###Step4. Aberrant DNA methylation in the cancer genomes
+`dmr` was used to identify differentially reference UMRs in the cancer genomes.
 
 ```
-dmr -r ref_UM/ref_UM.bed -rh 1 -w1 file_list_1.txt  -w2 file_list_2.txt -o diff
+dmr -r ref_UM/ref_UM.bed -rh 1 -w1 Normal_file_list.txt  -w2 Cancer_file_list.txt -o diff
 ```
+* -r reference UMRs 
+* -rh headline
+* -w1 wig file lists of group 1, each row is a methylome
+* -w2 wig file lists of group 2, each row is a methylome
 
 ###Reference
 [1] Xi Y, Li W. BSMAP: whole genome bisulfite sequence MAPping program[J]. BMC bioinformatics, 2009, 10(1): 1.
