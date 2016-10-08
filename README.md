@@ -31,9 +31,9 @@ methratio.py -g -u *.bam -o *.bed -d hg19.fa -s ./samtools
 * -s path of `SAMTools`
 
 ###Step2. Identification of UMR
-Under Methylated Regions were defined as including at least 4 consecutive hypomethylated CpGs and mean methylation level less than 0.1 [2]. For each WGBS methylome, UMRs were identified by perl script `umr` and the command line was in the following:
+Under Methylated Regions were defined as including at least 4 consecutive hypomethylated CpGs and mean methylation level less than 0.1 [2]. For each WGBS methylome, UMRs were identified by perl script `umr` [3],the command line was in the following:
 ```
-umr -i *.wig -o pattern/ -n name
+umr -i *.wig -o umr/ -n name
 ```
 * -i input methylation level file(.wig)
 * -o output UMRs file
@@ -64,3 +64,5 @@ dmr -r ref_UM/ref_UM.bed -rh 1 -w1 Normal_file_list.txt  -w2 Cancer_file_list.tx
 [1] Xi Y, Li W. BSMAP: whole genome bisulfite sequence MAPping program[J]. BMC bioinformatics, 2009, 10(1): 1.
 
 [2] Jeong M, Sun D, Luo M, et al. Large conserved domains of low DNA methylation maintained by Dnmt3a[J]. Nature genetics, 2014, 46(1): 17-23.
+
+[3] Su J, Yan H, Wei Y, et al. CpG_MPs: identification of CpG methylation patterns of genomic regions from high-throughput bisulfite sequencing data[J]. Nucleic acids research, 2012: gks829.
