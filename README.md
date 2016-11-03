@@ -40,7 +40,8 @@ umr -i *.wig -o umr/ -n name
 * -n sample name
 
 ###Step3. Identification of reference UMR
-`refumr` was used to identify high confidence and reference under methylated regions from mutiple methylomes.
+`refumr` was used to identify high confidence and reference under methylated regions from mutiple methylomes. To remove differences within the tissues, normal tissue-specific UMRs were removed using a quantitative method QDMR based on Shannon entropy[4]. The lower the entropy value is, the bigger the difference of DNA methylation across sample is.
+
 ```
 refumr -p UM -path ./ -w wig_list.txt -o ref_UM
 ```
@@ -66,3 +67,5 @@ dmr -r ref_UM/ref_UM.bed -rh 1 -w1 Normal_file_list.txt  -w2 Cancer_file_list.tx
 [2] Jeong M, Sun D, Luo M, et al. Large conserved domains of low DNA methylation maintained by Dnmt3a[J]. Nature genetics, 2014, 46(1): 17-23.
 
 [3] Su J, Yan H, Wei Y, et al. CpG_MPs: identification of CpG methylation patterns of genomic regions from high-throughput bisulfite sequencing data[J]. Nucleic acids research, 2012: gks829.
+
+[4] Zhang Y, Liu H, Lv J, et al. QDMR: a quantitative method for identification of differentially methylated regions by entropy[J]. Nucleic acids research, 2011: gkr053.
