@@ -1,12 +1,12 @@
-#dUMR
+# dUMR
 dUMR(differentially Under Methylated Regions among normal tissues and pan-cancers) identifies reference UMRs from normal samples and cancer samples based on whole genome bisulfite sequencing data.
 
 ![workflow](https://github.com/methylation/dUMR/blob/master/imgs/dUMR.png "foo")
 
-###Dependencies
+### Dependencies
 dUMR requires a working of Perl,Python and R on Linux running environment. These scripts could be executable by using `chmod 755 command` to change permissions or using `perl command` directly.
 
-###Step1. Methylation calling
+### Step1. Methylation calling
 For each whole genome bisulfite sequencing sample, BSMAP v2.90 was used to align reads to reference genome(hg19) after trimming low quality bases and adapter sequence. [1]
 
 ```
@@ -30,7 +30,7 @@ methratio.py -g -u *.bam -o *.bed -d hg19.fa -s ./samtools
 * -d reference genome
 * -s path of `SAMTools`
 
-###Step2. Identification of UMR
+### Step2. Identification of UMR
 Under Methylated Regions were defined as including at least 4 consecutive hypomethylated CpGs and mean methylation level less than 0.1 [2]. For each WGBS methylome, UMRs were identified by perl script `umr` [3],the command line was in the following:
 ```
 umr -i *.wig -o umr/ -n name
@@ -39,7 +39,7 @@ umr -i *.wig -o umr/ -n name
 * -o output UMRs file
 * -n sample name
 
-###Step3. Identification of reference UMR
+### Step3. Identification of reference UMR
 `refumr` was used to identify high confidence and reference under methylated regions from mutiple methylomes. To remove differences within the tissues, normal tissue-specific UMRs were removed using a quantitative method QDMR based on Shannon entropy[4]. The lower the entropy value is, the bigger the difference of DNA methylation across sample is.
 
 ```
@@ -50,7 +50,7 @@ refumr -p UM -path ./ -w wig_list.txt -o ref_UM
 * -w wig file lists, each row is a methylome
 * -o reference UMRs out directory
 
-###Step4. Aberrant DNA methylation in the cancer genomes
+### Step4. Aberrant DNA methylation in the cancer genomes
 `dmr` was used to identify differentially reference UMRs in the cancer genomes.
 
 ```
@@ -61,7 +61,7 @@ dmr -r ref_UM/ref_UM.bed -rh 1 -w1 Normal_file_list.txt  -w2 Cancer_file_list.tx
 * -w1 wig file lists of group 1, each row is a methylome
 * -w2 wig file lists of group 2, each row is a methylome
 
-###Reference
+### Reference
 [1] Xi Y, Li W. BSMAP: whole genome bisulfite sequence mapping program[J]. BMC bioinformatics, 2009, 10(1): 1.
 
 [2] Jeong M, Sun D, Luo M, et al. Large conserved domains of low DNA methylation maintained by Dnmt3a[J]. Nature genetics, 2014, 46(1): 17-23.
